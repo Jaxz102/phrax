@@ -13,6 +13,8 @@
     "typecheck": "tsc"
   },
   "dependencies": {
+    "@ai-sdk/openai-compatible": "^3.0.24",
+    "@github-tools/eve-extension": "^0.1.0",
     "@vercel/connect": "0.4.3",
     "ai": "^7.0.38",
     "eve": "^0.30.8",
@@ -28,5 +30,4 @@
   "engines": {
     "node": "24.x"
   }
-
 }
