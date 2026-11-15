@@ -1,120 +1,109 @@
 # Phrax
 
-Phrax is an Eve agent that turns Slack requests into tested GitHub pull
-requests. Mention `@Phrax` in Slack, describe a code change, and continue in the
-thread if Phrax asks a clarifying question. The repository is edited and tested
-inside a per-session Vercel Sandbox. Pushing the branch and opening the PR is a
-human-approved action.
+Phrax works on GitHub repositories from Slack. Mention `@Phrax` in Slack,
+describe a code change or question, and keep replying in the thread if Phrax
+asks a question. Phrax picks the relevant repositories (several when a question
+spans, say, a frontend and the backend), clones them, edits and tests in a sandbox,
+and replies with a summary. It never pushes or opens pull requests.
+
+It is one Node process built on the
+[Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk) and
+[Slack Bolt](https://docs.slack.dev/tools/bolt-js/).
 
 ## How it works
 
 ```text
-Slack @mention
-      |
-      v
-durable Eve thread -- unclear --> Slack question --> resume same thread
-      |
-      v
-Vercel Sandbox: clone --> inspect --> edit --> test --> review diff
-      |
-      v
-Slack approval --> push phrax/* branch --> open GitHub PR
+Slack @mention ──> Bolt (/slack/events) ──> Agent SDK query()  (resumed per thread)
+                                               │
+                         prepare_repository ───┤  host clones each repo into ./<name> in the thread workspace
+                                               │
+               sandboxed Bash / Read / Edit ───┘  inspect, edit, test, reply in the thread
 ```
 
-Kimi K3 runs the agent loop through Moonshot AI's OpenAI-compatible API. Slack
-and GitHub credentials are managed by Vercel Connect. The GitHub token is
-injected at the Vercel Sandbox firewall for Git traffic and is never written to
-the sandbox filesystem or command environment.
+- **One session per Slack thread.** The thread's Agent SDK session ID is saved
+  in `~/.phrax/state.json`, and each new message resumes it.
+- **Sandboxed commands.** The agent's Bash tool runs in the Agent SDK sandbox
+  (Seatbelt on macOS, bubblewrap on Linux). It can write only to the thread
+  workspace and reach only the package-registry hosts in `src/agent.ts`.
+  File tools outside the workspace are denied.
+- **The GitHub token stays on the host.** The agent's environment is replaced
+  with a short allowlist, so `GITHUB_TOKEN` and the Slack secrets never reach
+  it. Cloning and the GitHub API run in `src/github.ts`.
+- **Repository settings aren't loaded.** `settingSources: []` keeps a cloned
+  repository's `.claude/settings.json` hooks from running. The agent reads
+  `AGENTS.md` and `CLAUDE.md` as ordinary files.
 
 ## Prerequisites
 
 - Node.js 24
-- A Vercel account with Eve, Sandbox, and Connect access
+- macOS, or Linux with `bubblewrap` and `socat` installed (for the sandbox)
+- An Anthropic API key
 - A Slack workspace where you can install an app
-- A GitHub organization or account where you can install a GitHub App
-- A Kimi K3 API token
+- A GitHub fine-grained personal access token
 
 ## Configure
 
-1. Install and authenticate the Vercel CLI, then link this directory:
+1. **GitHub token.** Create a
+   [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new)
+   with access to only the repositories Phrax should work on, and these
+   permissions:
+   - Contents: read
+   - Metadata: read (added automatically)
 
-   ```sh
-   npm install -g vercel@latest
-   vercel login
-   vercel link
-   ```
+2. **Slack app.** At <https://api.slack.com/apps>:
+   - Turn **Socket Mode** off.
+   - **OAuth & Permissions**: add the bot scopes `app_mentions:read`,
+     `chat:write`, `im:history`, and `channels:history` (add
+     `groups:history` for private channels). Install the app and copy the
+     `xoxb-...` bot token.
+   - **Basic Information**: copy the Signing Secret.
+   - **Event Subscriptions**: enable events, set the Request URL to
+     `https://<public-host>/slack/events`, and subscribe to the bot events
+     `app_mention`, `message.im`, and `message.channels` (and
+     `message.groups` for private channels).
 
-2. Create a Slack Connect client with triggers. Record its UID, such as
-   `slack/phrax`, and point the trigger at Eve's Slack route:
-
-   ```sh
-   vercel connect create slack --triggers
-   vercel connect detach slack/phrax --yes
-   vercel connect attach slack/phrax --triggers --trigger-path /eve/v1/slack --yes
-   ```
-
-   In the connector's Advanced settings, enable these trigger events and bot
-   scopes:
-
-   - Events: `app_mention`, `message.im`, `message.channels`
-   - Scopes: `app_mentions:read`, `chat:write`, `im:history`,
-     `channels:history`
-
-   Add `message.groups` and `groups:history` if Phrax will operate in private
-   channels. Install the resulting Slack app in the workspace.
-
-3. Create a GitHub connector from the Vercel Connect dashboard or with
-   `vercel connect`. Link it to this Vercel project and install its GitHub App
-   on only the repositories Phrax should access. Phrax requests these scopes:
-
-   - Metadata: read
-   - Contents: read and write
-   - Pull requests: read and write
-
-4. Copy `.env.example` to `.env.local` and fill in `KIMI_API_KEY`. Set the two
-   connector UIDs if they differ from `slack/phrax` and `github/phrax`.
-   `PHRAX_DEFAULT_REPOSITORY` is optional and uses `owner/repository` format.
-
-   Do not commit `.env.local`; it is ignored by Git.
-
-5. Pull the linked Vercel environment for local Connect authentication:
-
-   ```sh
-   vercel env pull
-   ```
+3. **Environment.** Copy `.env.example` to `.env` and fill in
+   `ANTHROPIC_API_KEY`, `SLACK_BOT_TOKEN`, `SLACK_SIGNING_SECRET`, and
+   `GITHUB_TOKEN`. `.env` is ignored by Git.
 
 ## Develop
 
 ```sh
+npm install
 npm run typecheck
-npm run build
-npm run dev
+npm run dev          # restarts on file changes
 ```
 
-The interactive Eve development UI uses the same agent definition. Full Slack
-webhook testing requires a reachable deployment and installed Connect app.
+Slack needs a public URL to reach your machine. In a second terminal, run
+ngrok against the same port:
+
+```sh
+ngrok http --url=<your-static-domain>.ngrok-free.app 3000
+```
+
+Or run both at once with `make start` (`make dev` restarts on file changes).
+It uses `NGROK_URL` from `.env` if set, prints the Slack Request URL, and
+stops both processes on Ctrl-C.
+
+Use a separate Slack app for development so production keeps its Request URL.
 
 ## Deploy
 
-Add `KIMI_API_KEY`, `KIMI_BASE_URL`, `KIMI_MODEL`, and optional
-`PHRAX_DEFAULT_REPOSITORY` to the Vercel project environment. Connector UIDs may
-remain at their defaults when those are the UIDs you created. Then deploy:
+Run `npm start` as a long-lived process on a host with a public HTTPS URL,
+such as a VM, Fly.io, Railway, or Render. Serverless functions are not a good
+fit because a turn can run for many minutes. Keep `PHRAX_DATA_DIR` on a
+persistent disk: it holds the thread workspaces and session state. Agent SDK
+session transcripts live in `~/.claude/projects/`, so persist that too.
 
-```sh
-VERCEL_USE_EXPERIMENTAL_FRAMEWORKS=1 vercel deploy --prod
-```
+## Operational notes
 
-The Slack trigger destination must be `/eve/v1/slack` on the production
-deployment.
-
-## Operational safeguards
-
-- Every GitHub publish requires an explicit Slack approval.
-- Phrax creates `phrax/*` branches and never merges PRs.
-- GitHub credentials remain outside the execution sandbox.
-- Each Slack thread has its own durable session and sandbox workspace.
-- Use a fresh Slack thread for a different task or repository.
-- Restrict the GitHub App installation to the repositories the bot needs.
-- Sandbox egress is open for dependency installation and tests. For sensitive
-  repositories, replace the `"*"` rule in `agent/lib/github.ts` with an
-  organization-approved domain allowlist.
+- Configure repositories with `<NAME>_REPOSITORY=owner/repository` in `.env`
+  (for example `BACKEND_REPOSITORY`). The name becomes the clone directory and
+  what users can call it in Slack. Restart Phrax after changing them.
+- A thread keeps its clones, so follow-ups can reuse them or add another
+  repository. Use a fresh Slack thread for an unrelated task.
+- Thread workspaces are not cleaned up automatically. Delete old directories
+  under `~/.phrax/threads/` when you no longer need them.
+- Set `PHRAX_MAX_BUDGET_USD` to cap spend per turn.
+- To let sandboxed commands reach more hosts (a private registry, for
+  example), add them to `PHRAX_ALLOWED_DOMAINS`.
