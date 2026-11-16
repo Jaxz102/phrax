@@ -8,6 +8,7 @@ import type { ThreadPaths } from "./store.ts";
 
 const execFileAsync = promisify(execFile);
 const repositoryPattern = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
+const gitTimeoutMs = 5 * 60_000;
 
 export interface Repository {
   owner: string;
@@ -79,10 +80,12 @@ async function git(args: string[], options: { cwd?: string; authenticated?: bool
       cwd: options.cwd,
       env,
       maxBuffer: 16 * 1024 * 1024,
+      timeout: gitTimeoutMs,
     });
     return stdout.trim();
   } catch (error) {
-    const failure = error as { stderr?: string; message: string };
+    const failure = error as { stderr?: string; message: string; killed?: boolean };
+    if (failure.killed) throw new Error(`git ${args[0]} timed out after ${gitTimeoutMs / 60_000} minutes.`);
     const details = (failure.stderr || failure.message).trim().slice(0, 2_000);
     throw new Error(`git ${args[0]} failed: ${details}`);
   }
@@ -115,17 +118,18 @@ export async function getDefaultBranch(repository: Repository) {
 }
 
 /**
- * Clones into a host-only staging directory, configures it there, then moves
- * it into the workspace. Git never runs from the host inside a directory the
- * agent could have touched, and rename fails rather than following anything
- * the agent placed at the target path.
+ * Shallow-clones the latest commit (no history) into a host-only staging
+ * directory, configures it there, then moves it into the workspace. Git never
+ * runs from the host inside a directory the agent could have touched, and
+ * rename fails rather than following anything the agent placed at the target
+ * path.
  */
 export async function cloneRepository(repository: Repository, baseBranch: string, paths: ThreadPaths, directory: string) {
   const staged = join(paths.staging, directory);
   const target = join(paths.workspace, directory);
   await rm(staged, { recursive: true, force: true });
   await mkdir(paths.staging, { recursive: true });
-  await git(["clone", "--branch", baseBranch, "--single-branch", remoteUrl(repository), staged], {
+  await git(["clone", "--depth", "1", "--branch", baseBranch, "--single-branch", remoteUrl(repository), staged], {
     authenticated: true,
   });
   // No credentials are stored, so the workspace cannot reach GitHub with the token.
